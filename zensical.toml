@@ -1,0 +1,48 @@
+[project]
+site_name = "AVRA"
+site_url = "https://avra-auth.github.io/Additional-Competitions"
+docs_dir = "docs"
+site_dir = "site"   # matches `path: site` in the workflow
+
+extra_javascript = [
+  "javascripts/mathjax.js",
+  "https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js",
+]
+
+[project.theme]
+variant = "classic"   # Old-style look, because I like it better
+features = [
+  "navigation.tracking",
+  "navigation.tabs",
+  "navigation.tabs.sticky",
+  "navigation.sections",
+  "navigation.top",
+  "toc.follow",
+  "toc.integrate",
+]
+
+[[project.theme.palette]]
+scheme = "slate"
+
+# Markdown extensions
+[project.markdown_extensions.footnotes]
+[project.markdown_extensions.attr_list]
+[project.markdown_extensions.admonition]
+[project.markdown_extensions.toc]
+permalink = true
+
+[project.markdown_extensions.pymdownx.highlight]
+[project.markdown_extensions.pymdownx.superfences]
+[project.markdown_extensions.pymdownx.details]
+[project.markdown_extensions.pymdownx.magiclink]
+[project.markdown_extensions.pymdownx.saneheaders]
+[project.markdown_extensions.pymdownx.tasklist]
+[project.markdown_extensions.pymdownx.emoji]
+[project.markdown_extensions.pymdownx.critic]
+[project.markdown_extensions.pymdownx.caret]
+[project.markdown_extensions.pymdownx.keys]
+[project.markdown_extensions.pymdownx.mark]
+[project.markdown_extensions.pymdownx.tilde]
+
+[project.markdown_extensions.pymdownx.arithmatex]
+generic = true
