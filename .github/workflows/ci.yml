@@ -4,6 +4,7 @@ on:
     branches:
       - master 
       - main
+      - Copernicus
 permissions:
   contents: write
 jobs:
