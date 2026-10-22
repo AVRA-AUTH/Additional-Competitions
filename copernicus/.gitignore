@@ -1,0 +1,11 @@
+.venv/
+.vscode/
+data_cache/
+__pycache__/
+*.pyc
+*.nc
+*.db
+assets/chl.png
+AVRA_project_context.md
+check.png
+check.png
