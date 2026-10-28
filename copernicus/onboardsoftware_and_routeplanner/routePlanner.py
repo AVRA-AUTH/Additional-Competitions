@@ -6,11 +6,9 @@ planRoute() takes a user-defined area and monitoring subareas (4 GPS corners eac
 returns an ordered waypoint list that circles each subarea on a buffer ring.
 
 @par Function notes and assumptions (keep in sync with the requirements)
-- Land: the UI is assumed to only let the user pick sea areas, so every point that reaches
-  the planner is sea. The planner does NOT check land. An optional `isAllowed` hook lets a
-  land mask or coast-distance check (MSN-13, at most about 3 km from the coast) be plugged
-  in later. Only ring corners, start and end are checked with it, not the straight legs
-  between them.
+- Land/coast: optional `isAllowed` and `isLegAllowed` hooks allow an integration layer to
+  validate points and full graph/ring segments. The standalone planner has no built-in
+  coastline data; the integration injects a coarse land mask and a 3 km coast rule.
 - Transit legs are shortest paths on a visibility graph whose obstacles are the buffered
   rings of ALL subareas (including skipped ones), so the vessel never crosses a farm
   (cages and moorings are assumed off limits). Open water is assumed everywhere else.
@@ -21,7 +19,8 @@ returns an ordered waypoint list that circles each subarea on a buffer ring.
 - The waypoint list holds corners only. Sampling every `sampleSpacingMeters` is NOT
   expanded into waypoints: legs flagged `isSamplingLeg` tell the onboard sampler where to
   trigger samples (FUN-3). sampleSchedule() expands them into explicit points when needed.
-- All subareas have equal weight for now, but `priority` is already carried through.
+- `priority` influences which subareas are dropped when the distance budget is exceeded.
+  It does not yet allocate a denser sampling pattern inside higher-priority subareas.
 - The budget is a distance cap (30 km default, margin already built into the requirement).
   Budget.fromEnergy() maps a power model to a cap, since speed is fixed near 2 knots.
 - Geometry works in a local metric frame (equirectangular, fine at kilometre scale).
@@ -309,7 +308,8 @@ class LegGraph:
     @param points Planar position of every node.
     @param obstacles Counter-clockwise convex polygons that legs must not cross.
     """
-    def __init__(self, points: list[PlanarPoint], obstacles: list[list[PlanarPoint]]):
+    def __init__(self, points: list[PlanarPoint], obstacles: list[list[PlanarPoint]],
+                 isLegAllowed: Optional[Callable[[PlanarPoint, PlanarPoint], bool]] = None):
         nodeCount = len(points)
         self.points = points
         unreachable = float("inf")
@@ -319,7 +319,8 @@ class LegGraph:
             self.distances[node][node] = 0.0
             self.nextNode[node][node] = node
             for otherNode in range(node + 1, nodeCount):
-                if isLegFree(points[node], points[otherNode], obstacles):
+                legAllowed = (isLegAllowed is None or isLegAllowed(points[node], points[otherNode]))
+                if legAllowed and isLegFree(points[node], points[otherNode], obstacles):
                     legLength = distanceBetween(points[node], points[otherNode])
                     self.distances[node][otherNode] = legLength
                     self.distances[otherNode][node] = legLength
@@ -429,7 +430,9 @@ def optimizeOrder(identifiers: list[str], rings: dict[str, Ring], graph: LegGrap
 
 def buildRings(subAreas: list[SubArea], areaPolygon: list[PlanarPoint], frame: LocalFrame,
                sampling: SamplingSpec, isAllowed: Optional[Callable[[GeoPoint], bool]],
-               plan: RoutePlan) -> tuple[dict[str, Ring], dict[str, list[PlanarPoint]]]:
+               plan: RoutePlan,
+               isLegAllowed: Optional[Callable[[GeoPoint, GeoPoint], bool]] = None
+               ) -> tuple[dict[str, Ring], dict[str, list[PlanarPoint]]]:
     """
     @brief Builds one buffered ring per usable subarea.
     @details Fills plan.skippedReasons and plan.warnings as a side effect. Rings leaving the
@@ -457,6 +460,14 @@ def buildRings(subAreas: list[SubArea], areaPolygon: list[PlanarPoint], frame: L
         if isAllowed and not all(isAllowed(frame.toGeographic(corner)) for corner in ringCorners):
             plan.skippedReasons[subArea.identifier] = "violatesConstraint"
             continue
+        if isLegAllowed:
+            ringLegsAllowed = all(
+                isLegAllowed(frame.toGeographic(ringCorners[index]),
+                             frame.toGeographic(ringCorners[(index + 1) % len(ringCorners)]))
+                for index in range(len(ringCorners)))
+            if not ringLegsAllowed:
+                plan.skippedReasons[subArea.identifier] = "samplingLegViolatesConstraint"
+                continue
         perimeter = sum(distanceBetween(ringCorners[index], ringCorners[(index + 1) % len(ringCorners)])
                         for index in range(len(ringCorners)))
         center = (sum(corner[0] for corner in polygon) / len(polygon),
@@ -499,7 +510,8 @@ def planRoute(area: list[GeoPoint],
               sampling: Optional[SamplingSpec] = None,
               cruiseSpeedMetersPerSecond: float = defaultCruiseSpeedMetersPerSecond,
               maxTransitOffsetMeters: float = 2000.0,
-              isAllowed: Optional[Callable[[GeoPoint], bool]] = None) -> RoutePlan:
+              isAllowed: Optional[Callable[[GeoPoint], bool]] = None,
+              isLegAllowed: Optional[Callable[[GeoPoint, GeoPoint], bool]] = None) -> RoutePlan:
     """
     @brief Plans a route that circles every subarea on a buffer ring within the budget.
     @param area Four GPS corners of the user-defined area of interest.
@@ -548,7 +560,8 @@ def planRoute(area: list[GeoPoint],
     if len(set(identifiers)) != len(identifiers):
         plan.warnings.append("duplicate subarea identifiers")
         return plan
-    rings, obstacles = buildRings(subAreas, areaPolygon, frame, sampling, isAllowed, plan)
+    rings, obstacles = buildRings(subAreas, areaPolygon, frame, sampling, isAllowed, plan,
+                                  isLegAllowed=isLegAllowed)
 
     graphPoints: list[PlanarPoint] = [startPlanar] + ([endPlanar] if endPoint else [])
     startNode, endNode = 0, (1 if endPoint else None)
@@ -562,7 +575,11 @@ def planRoute(area: list[GeoPoint],
             if isInsideConvex(endpointPlanar, obstacleCorners, toleranceMeters=-1.0):
                 plan.warnings.append(f"{endpointName} lies inside the ring of subarea {identifier}")
                 return plan
-    graph = LegGraph(graphPoints, list(obstacles.values()))
+    planarLegAllowed = None
+    if isLegAllowed:
+        planarLegAllowed = lambda first, second: isLegAllowed(
+            frame.toGeographic(first), frame.toGeographic(second))
+    graph = LegGraph(graphPoints, list(obstacles.values()), isLegAllowed=planarLegAllowed)
 
     order = optimizeOrder(list(rings), rings, graph, startNode, endNode)
     order = dropUntilWithinBudget(order, rings, graph, startNode, endNode,

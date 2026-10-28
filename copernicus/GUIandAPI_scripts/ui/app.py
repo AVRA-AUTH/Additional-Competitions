@@ -11,6 +11,8 @@ from avra.copernicus.client import fetch, days, field_at, sample
 from avra.ui import icons
 from avra.ui.render import field_to_png, colourbar_uri, grid_bounds, layer_scale, globe
 from avra.zones import zones_from_geojson, zone_bounds, inside_grid
+from avra.integration.api import api_blueprint
+from avra.integration.mission import run_mission
 
 # ---- data (read once from the local cache; never touch the network from a callback) -------------
 ds = fetch()
@@ -94,9 +96,11 @@ def card(cid, text, extra=""):
 
 # ---- layout ---------------------------------------------------------------------------------------
 app = Dash(__name__, assets_folder=str(config.ROOT / "assets"))
+app.server.register_blueprint(api_blueprint)
 app.layout = html.Div(className="shell", children=[
     dcc.Store(id="pin_mode", data=False), dcc.Store(id="start", data=None), dcc.Store(id="run", data=False),
     dcc.Store(id="zones", data=[]),
+    dcc.Store(id="last_mission", data=None),
     dcc.Store(id="speed", data="medium"), dcc.Store(id="mode_cmd", data="nominal"),
 
     html.Div(className="toolbar", children=[
@@ -127,6 +131,9 @@ app.layout = html.Div(className="shell", children=[
                     "circle": False, "marker": False, "circlemarker": False})]),
                 dl.LayerGroup(id="zone_layer"),
                 dl.LayerGroup(id="start_layer"),
+                dl.LayerGroup(id="route_layer"),
+                dl.LayerGroup(id="samples_layer"),
+                dl.LayerGroup(id="divergence_layer"),
             ]),
             html.Div(className="floatwrap", children=[
                 html.Div(id="ship_box", className="floatbox"),
@@ -149,6 +156,7 @@ app.layout = html.Div(className="shell", children=[
         html.Div(id="status", className="status"),
     ]),
     html.Div(id="zone_note", className="warn2"),
+    html.Div(id="mission_summary", className="mission-summary"),
     html.Details(className="dev", children=[html.Summary("Zones sent to the planner"),
                                             html.Pre(id="zones_json")]),
 ])
@@ -211,9 +219,13 @@ def draw_start(start):
 
 
 @app.callback(Output("ship_box", "children"), Input("start", "data"), Input("layer", "value"),
-              Input("day", "value"))
-def ship_box(start, var, i):
-    rows = [html.B("Current ship position"), html.Div("X: -   Y: -   value: -  (simulator not connected)")]
+              Input("day", "value"), Input("last_mission", "data"))
+def ship_box(start, var, i, last_mission):
+    rows = [html.B("Current ship position"), html.Div("X: -   Y: -   value: -  (run a mission to connect the simulator)")]
+    if last_mission and last_mission.get("final_position"):
+        position = last_mission["final_position"]
+        rows = [html.B("Current ship position"),
+                html.Div(f"X: {position['longitude']:.4f}   Y: {position['latitude']:.4f}  (last simulation)")]
     if start:
         s = sample(field_at(ds, var, i), start["lat"], start["lon"], fallback_cells=2)
         v = "-" if s.status in ("land", "outside") else f"{s.value:.3f}"
@@ -241,21 +253,140 @@ def zoom(_a, _b, zones, start, click):
     return {"center": [lat, lon], "zoom": 10, "transition": "flyTo"}
 
 
-# ---- start / stop (UI state only until the simulator exists) ---------------------------------------------
-@app.callback(Output("run", "data"), Output("btn-run-img", "src"),
-              Input("btn-run", "n_clicks"), State("run", "data"), prevent_initial_call=True)
-def run(_n, running):
-    running = not running
-    return running, icons.STOP if running else icons.PLAY
+# ---- end-to-end mission: UI zones -> planner -> onboard simulator -> validator ---------------------------
+def _mission_route_layer(plan_history):
+    layers = []
+    for index, item in enumerate(plan_history or []):
+        plan = item.get("plan", {})
+        positions = [[wp["latitude"], wp["longitude"]] for wp in plan.get("waypoints", [])]
+        if len(positions) >= 2:
+            layers.append(dl.Polyline(positions=positions, color="#00d5ff" if index == 0 else "#ffbf47",
+                                      weight=4 if index == 0 else 3, opacity=0.9,
+                                      dashArray=None if index == 0 else "7 6",
+                                      children=dl.Tooltip("Initial planned route" if index == 0 else
+                                                          f"Replan: {item.get('reason', 'updated route')}")))
+    return layers
 
 
-@app.callback(Output("hint", "children"), Input("pin_mode", "data"), Input("run", "data"))
-def hint(pin_mode, running):
+def _mission_measurement_layer(run_result):
+    import csv
+    rows = []
+    path = run_result.get("output_dir")
+    if path:
+        try:
+            with open(f"{path}/crosscheck_samples.csv", newline="", encoding="utf-8") as handle:
+                rows = list(csv.DictReader(handle))
+        except OSError:
+            rows = []
+    if not rows:
+        return []
+    stride = max(1, len(rows) // 220)
+    layers = []
+    for row in rows[::stride]:
+        try:
+            lat, lon = float(row["latitude"]), float(row["longitude"])
+        except (TypeError, ValueError, KeyError):
+            continue
+        layers.append(dl.CircleMarker(center=[lat, lon], radius=2.5, color="#d2f5ff",
+                                      fillColor="#00bfe8", fillOpacity=0.8, weight=1,
+                                      children=dl.Tooltip("ASV measurement")))
+    return layers
+
+
+def _mission_divergence_layer(run_result):
+    layers = []
+    for cell in (run_result.get("validation") or {}).get("cell_results", []):
+        if not cell.get("flagged") or not cell.get("cell_bounds"):
+            continue
+        bounds = cell["cell_bounds"]
+        lat = (float(bounds[0][0]) + float(bounds[1][0])) / 2.0
+        lon = (float(bounds[0][1]) + float(bounds[1][1])) / 2.0
+        bias = float(cell.get("bias_sensor_minus_copernicus_mg_m3", 0.0))
+        layers.append(dl.CircleMarker(center=[lat, lon], radius=8, color="#ff3030",
+                                      fillColor="#ff3030", fillOpacity=0.85, weight=2,
+                                      children=dl.Tooltip(
+                                          f"Divergence: bias {bias:+.3f} mg/m³; n={cell.get('count', 0)}")))
+    return layers
+
+
+@app.callback(
+    Output("run", "data"), Output("btn-run-img", "src"),
+    Output("route_layer", "children"), Output("samples_layer", "children"),
+    Output("divergence_layer", "children"), Output("mission_summary", "children"),
+    Output("last_mission", "data"), Output("card-battery", "children"),
+    Output("card-autonomy", "children"), Output("card-mode", "children"),
+    Output("card-comms", "children"), Output("card-route", "children"),
+    Output("card-loop", "children"),
+    Input("btn-run", "n_clicks"), State("start", "data"), State("zones", "data"),
+    State("layer", "value"), State("speed", "data"), prevent_initial_call=True)
+def run(_n, start, zones, variable, speed):
+    empty = (False, icons.PLAY, [], [], [], html.Div(), None, "-", "-", "-", "-", "-", "-")
+    if not start:
+        return (*empty[:5], html.Div("Set a launch position first: click the pin tool, then click the map.", className="warn"),
+                {"status": "not_started", "error": "No start position was set."}, *empty[7:])
+    spacing = {"fast": 40.0, "medium": 20.0, "slow": 5.0}.get(speed, 20.0)
+    payload = {
+        "zones": zones or [],
+        "start": {"lat": start.get("lat"), "lon": start.get("lon")},
+        "variable": variable,
+        "budget_meters": 30000.0,
+        "buffer_meters": 50.0,
+        "sample_spacing_meters": spacing,
+        "coast_rule_km": 3.0,
+        "enforce_coast_rule": True,
+        "divergence_threshold_mg_m3": 0.15,
+    }
+    try:
+        result = run_mission(payload, output_root=config.ROOT / "runs", dataset=ds)
+    except Exception as error:
+        error_result = {"status": "error", "error": str(error)}
+        return (False, icons.PLAY, [], [], [],
+                html.Div([html.B("Mission could not start. "), str(error)], className="warn"),
+                error_result, "-", "-", "-", "-", "-", "-")
+
+    plan_history = result.get("plan_history", [])
+    if not plan_history and result.get("plan"):
+        plan_history = [{"reason": "initial", "plan": result["plan"]}]
+    validation = result.get("validation", {})
+    cells_flagged = validation.get("cells_flagged", 0)
+    cells_compared = validation.get("cells_compared", 0)
+    global_bias = validation.get("global_bias_sensor_minus_copernicus_mg_m3")
+    bias_text = "n/a" if global_bias is None else f"{global_bias:+.3f} mg/m³"
+    message = html.Div([
+        html.B(f"Mission {result.get('status', 'finished')}. "),
+        html.Span(f"{result.get('sample_count', 0)} samples; {cells_flagged}/{cells_compared} Copernicus cells flagged; "),
+        html.Span(f"global sensor-minus-product bias {bias_text}."),
+        html.Div(f"Replans: {len(result.get('replans', []))} · stop: {result.get('stop_reason', result.get('message', 'unknown'))}"),
+        html.Div(f"Artifacts: {result.get('output_dir', 'not written')}", className="small"),
+    ])
+    route_layers = _mission_route_layer(plan_history)
+    sample_layers = _mission_measurement_layer(result)
+    divergence_layers = _mission_divergence_layer(result)
+    total = max(1, len((plan_history[0].get("plan", {}).get("covered_subareas", [])) if plan_history else []))
+    progress = f"{100.0 * len(result.get('completed_subareas', [])) / total:.0f}%"
+    remaining_h = max(0.0, float(result.get("remaining_budget_m", 0.0)) / 1.028888 / 3600.0)
+    first_plan = (plan_history[0].get("plan", {}) if plan_history else {})
+    loop_h = float(first_plan.get("estimated_duration_s", 0.0)) / 3600.0
+    battery = result.get("final_battery_fraction")
+    battery_text = "-" if battery is None else f"{100 * float(battery):.0f}%"
+    status = result.get("status", "unknown")
+    return (False, icons.PLAY, route_layers, sample_layers, divergence_layers, message, result,
+            battery_text, f"{remaining_h:.1f} h", result.get("final_mode", status),
+            "connected (simulated)", progress, f"{loop_h:.1f} h")
+
+
+@app.callback(Output("hint", "children"), Input("pin_mode", "data"), Input("run", "data"),
+              Input("last_mission", "data"))
+def hint(pin_mode, running, last_mission):
     if pin_mode:
         return "Click the map to place the start position."
     if running:
-        return "Start pressed. The simulator and planner are not connected yet."
-    return "Draw rectangles on the map: the first is the background area, later ones are priority areas."
+        return "Mission running."
+    if last_mission and last_mission.get("status") == "complete":
+        return "Mission complete: cyan circles are samples; red circles identify Copernicus cells with divergence."
+    if last_mission and last_mission.get("error"):
+        return "Mission was not started; check the message below and make sure the coast mask/dependencies are installed."
+    return "Draw one background rectangle first, then one or more monitoring rectangles. Pin a start position, then press Start."
 
 
 # ---- selection pills (speed / mode) ---------------------------------------------------------------------

@@ -43,7 +43,8 @@ class SimpleVesselSimulator:
     def __init__(self, startPosition: GeographicPosition, stateOfCharge: float = 1.0,
                  batteryCapacityWattHours: float = 2178.0, propulsionPowerWatts: float = 165.0,
                  hotelPowerWatts: float = 20.0, solarPowerWatts: float = 0.0,
-                 driftMetersPerSecond: float = 0.0):
+                 driftMetersPerSecond: float = 0.0,
+                 payloadProvider: Optional[Callable[[float, float, float], dict[str, float]]] = None):
         self.position = startPosition
         self.stateOfCharge = stateOfCharge
         self.batteryCapacityWattHours = batteryCapacityWattHours
@@ -59,6 +60,7 @@ class SimpleVesselSimulator:
         self.thrusterIsOperational = True
         self.communicationLinkIsUp = True
         self.batteryTemperatureCelsius = 25.0
+        self.payloadProvider = payloadProvider
 
     def movePosition(self, eastMeters: float, northMeters: float) -> None:
         """
@@ -95,8 +97,13 @@ class SimpleVesselSimulator:
         """
         @brief The vehicle readings at the current simulation time.
         """
-        chlorophyll = 0.3 + 0.2 * math.sin(self.position.longitude * 2000.0)
-        temperature = 22.0 + 2.0 * math.cos(self.position.latitude * 2000.0)
+        if self.payloadProvider is None:
+            # A neutral constant keeps legacy onboard demos deterministic; mission runs inject
+            # the CSV-backed stand-in or a real sensor provider explicitly.
+            payloadReadings = {"chlorophyll": 0.5, "seaSurfaceTemperature": 20.0}
+        else:
+            payloadReadings = dict(self.payloadProvider(
+                self.position.latitude, self.position.longitude, self.timeSeconds))
         return VehicleInputs(
             timeSeconds=self.timeSeconds, position=self.position, headingDegrees=self.headingDegrees,
             speedMetersPerSecond=self.speedMetersPerSecond, hasGpsFix=self.hasGpsFix,
@@ -106,7 +113,7 @@ class SimpleVesselSimulator:
             chargingPowerWatts=self.solarPowerWatts, thrusterIsOperational=self.thrusterIsOperational,
             communicationLinkIsUp=self.communicationLinkIsUp,
             simulatedDriftMetersPerSecond=self.driftMetersPerSecond,
-            payloadReadings={"chlorophyll": chlorophyll, "seaSurfaceTemperature": temperature})
+            payloadReadings=payloadReadings)
 
 
 @dataclass

@@ -1,7 +1,10 @@
 from dataclasses import dataclass
 import numpy as np
 import xarray as xr
-import copernicusmarine as cm
+try:
+    import copernicusmarine as cm
+except ImportError:  # cached NetCDF files can be used offline without the download client
+    cm = None
 from avra import config
 
 
@@ -13,6 +16,8 @@ def _open(path):
 
 
 def _last_available_day():
+    if cm is None:
+        raise RuntimeError("Copernicus Marine toolbox is required to refresh the data cache")
     full = cm.open_dataset(dataset_id=config.DATASET_ID)    # lazy, metadata only
     return np.datetime64(str(full.time.max().values)[:10])
 
@@ -21,6 +26,8 @@ def fetch(refresh=False):
     """Download once, then read from the local cache. refresh=True re-downloads."""
     if config.CACHE_FILE.exists() and not refresh:
         return _open(config.CACHE_FILE)
+    if cm is None:
+        raise RuntimeError("Copernicus Marine toolbox is required to fetch data; install requirements.txt")
     config.CACHE_FILE.parent.mkdir(exist_ok=True)
     end = min(np.datetime64(config.END), _last_available_day())   # never ask past the last forecast day
     kwargs = dict(dataset_id=config.DATASET_ID, variables=list(config.VARIABLES),

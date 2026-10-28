@@ -54,3 +54,8 @@ body { margin: 0; font-family: system-ui, sans-serif; background: #e6eef7; color
 /* permanent zone labels without the default tooltip bubble */
 .leaflet-tooltip { background: rgba(255,255,255,0.8); border: 1px solid #111; color: #111;
   font-weight: 600; box-shadow: none; }
+
+/* mission summary returned by the connected simulator/validator loop */
+.mission-summary { margin-top: 8px; padding: 8px 10px; font-size: 12px; line-height: 1.5;
+  background: rgba(255,255,255,0.9); border: 1px solid #9aabc4; border-radius: 6px; }
+.mission-summary .warn { color: #b3261e; }
