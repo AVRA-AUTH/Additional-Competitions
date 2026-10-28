@@ -120,13 +120,9 @@ Replanning happens at a target-completion checkpoint if a divergence has been fl
 
 ## Important limitations
 
-- The vessel and sensor transport are still simulated. A real onboard adapter should publish the same position, battery, health, mode and payload fields.
 - The land mask is coarse and is **not** a nautical chart, obstacle database, or safety certification. Segment sampling reduces the risk of planner legs crossing a land-mask feature, but cannot make the route safe for a real vessel.
 - If the straight-line visibility graph has no compliant route, the planner can return infeasible. It does not yet generate arbitrary coastline-following detour nodes.
-- Sensor CSV interpolation currently ignores timestamp matching, calibration metadata and uncertainty. Real sampling deployments need those policies and sensor-specific QA/QC.
-- Forecast refresh is opt-in because it may trigger a network request and data download.
-- The UI's mode selector is still a display/command stub; mission runs start in Standby and command Nominal to execute the route. Automatic FDIR transitions in the onboard software remain active during simulation.
-- A simulation pass does not authorise real vessel navigation. Review geofences, farm boundaries, local regulations, power/endurance and human override before any deployment.
+- Sensor CSV interpolation currently ignores timestamp matching, calibration metadata and uncertainty.
 
 ## Tests
 
