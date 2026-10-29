@@ -4,7 +4,7 @@ from functools import lru_cache
 
 import dash_leaflet as dl
 import numpy as np
-from dash import Dash, dcc, html, ctx, no_update, Input, Output, State
+from dash import Dash, dcc, html, ctx, no_update, Input, Output, State, ALL
 
 from avra import config
 from avra.copernicus.client import fetch, days, field_at, sample
@@ -19,12 +19,15 @@ ds = fetch()
 VARS = [v for v in config.VARIABLES if v in ds.data_vars]
 DAYS = days(ds)
 TODAY = np.datetime64(date.today())
-I0 = int(np.abs((DAYS - TODAY).astype(int)).argmin())          # day closest to today
+I0 = int(np.abs((DAYS - TODAY).astype(int)).argmin())
 SCALES = {v: layer_scale(ds, v) for v in VARS}
 BOUNDS = grid_bounds(field_at(ds, VARS[0], I0))
 CENTER = list(config.CENTER) if config.CENTER else [(BOUNDS[0][0] + BOUNDS[1][0]) / 2,
                                                     (BOUNDS[0][1] + BOUNDS[1][1]) / 2]
 CELL_KM = abs(float(ds.latitude[1] - ds.latitude[0])) * 111.0
+
+MAX_COAST_KM = 3.0
+COAST_FALLBACK_CELLS = max(2, int(np.ceil(MAX_COAST_KM / CELL_KM)) + 1)
 
 
 def label(v):
@@ -32,7 +35,6 @@ def label(v):
 
 
 def latlng(click):
-    """Leaflet click -> (lat, lon). Accepts {"lat","lng"} and [lat, lng] (depends on dash-leaflet version)."""
     ll = click["latlng"]
     return (ll["lat"], ll["lng"]) if isinstance(ll, dict) else (ll[0], ll[1])
 
@@ -83,7 +85,6 @@ CARDS_B = [("route", "% of completed route for monitoring"), ("loop", "Total tim
 
 
 def segmented(prefix, text, options, default):
-    """Rounded 'selection' control from the mockup: a pill with one button per choice."""
     return html.Div(className="pill", children=[
         html.Span(text, className="pilllbl"),
         *[html.Button(t, id=f"{prefix}-{v}", n_clicks=0, className="seg on" if v == default else "seg")
@@ -94,12 +95,113 @@ def card(cid, text, extra=""):
     return html.Div([html.Span(text), html.B("-", id=f"card-{cid}")], className=f"card {extra}".strip())
 
 
+# ---- UI-side checks (display / input validation only; nothing here is sent to the backend) ----------
+def coast_problem(lat, lon):
+    try:
+        da = field_at(ds, VARS[0], I0)
+        s = sample(da, lat, lon, fallback_cells=COAST_FALLBACK_CELLS)
+    except Exception:
+        return None
+    if s.status == "outside":
+        return "is outside the Copernicus grid"
+    if s.status == "land":
+        return f"is more than {MAX_COAST_KM:g} km from the coast"
+    if s.status == "fallback" and getattr(s, "dist_km", 0.0) > MAX_COAST_KM:
+        return f"is {s.dist_km:.1f} km from the coast (max {MAX_COAST_KM:g} km)"
+    return None
+
+
+def zone_coast_problem(z):
+    try:
+        (lat0, lon0), (lat1, lon1) = zone_bounds(z)
+        pts = [(lat0, lon0), (lat1, lon0), (lat0, lon1), (lat1, lon1),
+               ((lat0 + lat1) / 2, (lon0 + lon1) / 2)]
+        for lat, lon in pts:
+            p = coast_problem(lat, lon)
+            if p:
+                return p
+    except Exception:
+        return None
+    return None
+
+
+def zone_outside(inner_z, outer_z, eps=1e-4):
+    """True if inner_z is not fully inside outer_z (bounding boxes)."""
+    try:
+        (i0, i1), (o0, o1) = zone_bounds(inner_z), zone_bounds(outer_z)
+        return not (i0[0] >= o0[0] - eps and i0[1] >= o0[1] - eps
+                    and i1[0] <= o1[0] + eps and i1[1] <= o1[1] + eps)
+    except Exception:
+        return False
+
+
+# ---- tutorial / οδηγίες ---------------------------------------------------------------------------
+HELP_HIDE = {"display": "none"}
+HELP_SHOW = {"display": "flex", "position": "fixed", "inset": "0", "zIndex": "10000",
+             "background": "rgba(0,0,0,0.55)", "alignItems": "center", "justifyContent": "center"}
+HELP_BOX = {"background": "#fff", "color": "#1b2430", "maxWidth": "680px", "width": "92%",
+            "maxHeight": "85vh", "overflowY": "auto", "borderRadius": "12px", "padding": "18px 24px",
+            "boxShadow": "0 10px 40px rgba(0,0,0,0.4)", "fontSize": "14px", "lineHeight": "1.5"}
+
+HELP = {
+    "en": {
+        "title": "How to use this tool",
+        "steps": [
+            ("Look at the data. ", "Use the layer menu and the day slider at the bottom to see the Copernicus "
+                                   "data (grey = past, blue = today, green = forecast). Click the map to read a value."),
+            ("Draw the area of interest. ", "Use the rectangle tool on the map and draw ONE big rectangle first. "
+                                            "This first rectangle is the area of interest."),
+            ("Draw at least one monitoring rectangle. ", "Draw one or more extra rectangles INSIDE the first one. "
+                                                          "Rectangles outside it are shown in red and cannot be used "
+                                                          "for a mission until you delete them."),
+            ("Stay within 3 km of the coast. ", f"Every area and the start position must be within {MAX_COAST_KM:g} km "
+                                                f"of the coast."),
+            ("Set the start position. ", "Press the pin button, then click the map."),
+            ("Choose speed / accuracy. ", "Fast = sparse samples, Slow / fine = dense samples."),
+            ("Start the mission. ", "Press the play button."),
+            ("Read the result. ", "Blue line = initial route, orange dashed = replans, cyan dots = measurements, "
+                                  "red circles = cells where the sensor disagrees with Copernicus."),
+            ("Delete one area. ", "Press the × next to that area in the zone list. Other areas stay."),
+            
+        ],
+        "close": "Close",
+    },
+    "el": {
+        "title": "Οδηγίες χρήσης",
+        "steps": [
+            ("Δείτε τα δεδομένα. ", "Με το μενού στρώματος και τη μπάρα ημερών κάτω βλέπετε τα δεδομένα Copernicus. "
+                                    "Πατήστε στον χάρτη για να δείτε την τιμή."),
+            ("Σχεδιάστε την περιοχή ενδιαφέροντος. ", "Με το εργαλείο ορθογωνίου, σχεδιάστε πρώτα ΕΝΑ μεγάλο ορθογώνιο."),
+            ("Σχεδιάστε τουλάχιστον ένα ορθογώνιο παρακολούθησης. ", "Σχεδιάστε ένα ή περισσότερα ορθογώνια ΜΕΣΑ στο πρώτο. "
+                                                                      "Όσα είναι έξω εμφανίζονται με κόκκινο και δεν μπορούν να "
+                                                                      "χρησιμοποιηθούν σε αποστολή μέχρι να τα διαγράψετε."),
+            ("Μείνετε εντός 3 km από την ακτή. ", f"Κάθε περιοχή και η αφετηρία πρέπει να είναι έως {MAX_COAST_KM:g} km από την ακτή."),
+            ("Ορίστε την αφετηρία. ", "Πατήστε το κουμπί με την καρφίτσα και μετά κάντε κλικ στον χάρτη."),
+            ("Επιλέξτε ταχύτητα / ακρίβεια. ", "Fast = αραιά δείγματα, Slow / fine = πυκνά δείγματα."),
+            ("Ξεκινήστε την αποστολή. ", "Πατήστε το κουμπί play."),
+            ("Διαβάστε το αποτέλεσμα. ", "Μπλε γραμμή = αρχική διαδρομή, πορτοκαλί διακεκομμένη = επανασχεδιασμός, "
+                                         "γαλάζιες κουκκίδες = μετρήσεις, κόκκινοι κύκλοι = κελιά με απόκλιση."),
+            ("Διαγραφή μίας περιοχής. ", "Πατήστε το × δίπλα στην περιοχή στη λίστα. Οι υπόλοιπες μένουν."),
+            
+        ],
+        "close": "Κλείσιμο",
+    },
+}
+
+
+def help_body(lang):
+    h = HELP[lang]
+    return [html.H3(h["title"], style={"marginTop": "0"}),
+            html.Ol([html.Li([html.B(a), b], style={"marginBottom": "6px"}) for a, b in h["steps"]])]
+
+
 # ---- layout ---------------------------------------------------------------------------------------
 app = Dash(__name__, assets_folder=str(config.ROOT / "assets"))
 app.server.register_blueprint(api_blueprint)
 app.layout = html.Div(className="shell", children=[
     dcc.Store(id="pin_mode", data=False), dcc.Store(id="start", data=None), dcc.Store(id="run", data=False),
     dcc.Store(id="zones", data=[]),
+    dcc.Store(id="hidden_zones", data=[]),     # indices into edit.geojson that the user "deleted" (view-only)
     dcc.Store(id="last_mission", data=None),
     dcc.Store(id="speed", data="medium"), dcc.Store(id="mode_cmd", data="nominal"),
 
@@ -112,10 +214,15 @@ app.layout = html.Div(className="shell", children=[
                     title="Zoom in on the selected position (or the start)"),
         html.Button(html.Img(src=icons.PLAY, id="btn-run-img"), id="btn-run", n_clicks=0, className="tool",
                     title="Start / stop"),
+        html.Button(html.Img(src=icons.INFO, id="btn-help"),id="btn-help",n_clicks=0,className="tool",
+                    title="Information / Help"),
+        #html.Button("?", id="btn-help", n_clicks=0, className="tool", style={"fontWeight": "700"},
+                   # title="Instructions / Οδηγίες"),
         segmented("speed", "Monitoring speed / accuracy", SPEED, "medium"),
         segmented("mode", "Change to mode", MODES, "nominal"),
         html.Div(id="hint", className="hint"),
     ]),
+    html.Div(id="pin_note", className="warn2"),
 
     html.Div(className="body", children=[
         html.Div(className="cbar", children=html.Img(id="cbar", src=cbar(VARS[0]))),
@@ -143,6 +250,9 @@ app.layout = html.Div(className="shell", children=[
         html.Div(className="side", children=[
             *[card(c, t) for c, t in CARDS_A],
             *[card(c, t, "gap" if k == 0 else "") for k, (c, t) in enumerate(CARDS_B)],
+            html.Details(className="dev", children=[
+                html.Summary("Zones sent to the planner"),
+                html.Pre(id="zones_json", style={"maxHeight": "220px", "overflow": "auto", "fontSize": "11px"})]),
         ]),
     ]),
 
@@ -156,13 +266,32 @@ app.layout = html.Div(className="shell", children=[
         html.Div(id="status", className="status"),
     ]),
     html.Div(id="zone_note", className="warn2"),
+    html.Div(id="zone_list", style={"maxHeight": "220px", "overflowY": "auto", "padding": "4px 8px"}),
     html.Div(id="mission_summary", className="mission-summary"),
-    html.Details(className="dev", children=[html.Summary("Zones sent to the planner"),
-                                            html.Pre(id="zones_json")]),
+
+    html.Div(id="help", style=HELP_HIDE, children=html.Div(style=HELP_BOX, children=[
+        html.Div(style={"display": "flex", "gap": "8px", "marginBottom": "8px"}, children=[
+            html.Button("English", id="help-en", n_clicks=0),
+            html.Button("Ελληνικά", id="help-el", n_clicks=0),
+            html.Button("Close / Κλείσιμο", id="help-close", n_clicks=0, style={"marginLeft": "auto"}),
+        ]),
+        html.Div(id="help-body", children=help_body("en")),
+    ])),
 ])
 
 
-# ---- Copernicus layer: overlay, colourbar, status -----------------------------------------------
+# ---- tutorial open / close / language -------------------------------------------------------------
+@app.callback(Output("help", "style"), Output("help-body", "children"),
+              Input("btn-help", "n_clicks"), Input("help-close", "n_clicks"),
+              Input("help-en", "n_clicks"), Input("help-el", "n_clicks"), prevent_initial_call=True)
+def help_cb(*_):
+    t = ctx.triggered_id
+    if t == "help-close":
+        return HELP_HIDE, no_update
+    return HELP_SHOW, help_body("el" if t == "help-el" else "en")
+
+
+# ---- Copernicus layer: overlay, colourbar, status --------------------------------------------------
 @app.callback(Output("overlay", "url"), Output("cbar", "src"), Output("status", "children"),
               Input("layer", "value"), Input("day", "value"))
 def show(var, i):
@@ -179,7 +308,7 @@ def pick(click, var, i):
     da = field_at(ds, var, i)
     s = sample(da, lat, lon)
     if s.status == "land":
-        s = sample(da, lat, lon, fallback_cells=2)         # coast strip: show nearest sea cell, say so
+        s = sample(da, lat, lon, fallback_cells=2)
     val = "-" if s.status in ("land", "outside") else f"{s.value:.3f} mg/m³"
     rows = [html.B("Selected position"),
             html.Div(f"X: {lon:.4f}   Y: {lat:.4f}   value: {val}"),
@@ -195,18 +324,23 @@ def pick(click, var, i):
     return outline, rows
 
 
-# ---- start position (pin button, then click) -------------------------------------------------------
+# ---- start position (pin button, then click). Refused if too far from the coast. -------------------
 @app.callback(Output("pin_mode", "data"), Output("start", "data"), Output("btn-pin", "className"),
+              Output("pin_note", "children"),
               Input("btn-pin", "n_clicks"), Input("map", "clickData"),
               State("pin_mode", "data"), State("start", "data"), prevent_initial_call=True)
 def pin(_n, click, mode, start):
     if ctx.triggered_id == "btn-pin":
         mode = not mode
-        return mode, start, "tool on" if mode else "tool"
+        return mode, start, "tool on" if mode else "tool", ""
     if mode and click:
         lat, lon = latlng(click)
-        return False, {"lat": lat, "lon": lon}, "tool"
-    return no_update, no_update, no_update
+        p = coast_problem(lat, lon)
+        if p:
+            return (no_update, no_update, no_update,
+                    f"Start position refused: it {p}. Click a spot closer to the coast.")
+        return False, {"lat": lat, "lon": lon}, "tool", ""
+    return no_update, no_update, no_update, no_update
 
 
 @app.callback(Output("start_layer", "children"), Input("start", "data"))
@@ -236,7 +370,7 @@ def ship_box(start, var, i, last_mission):
     return rows
 
 
-# ---- zoom buttons (fit / zoom in) ---------------------------------------------------------------------
+# ---- zoom buttons (fit / zoom in) ------------------------------------------------------------------
 @app.callback(Output("map", "viewport"), Input("btn-fit", "n_clicks"), Input("btn-zoom", "n_clicks"),
               State("zones", "data"), State("start", "data"), State("map", "clickData"),
               prevent_initial_call=True)
@@ -253,7 +387,7 @@ def zoom(_a, _b, zones, start, click):
     return {"center": [lat, lon], "zoom": 10, "transition": "flyTo"}
 
 
-# ---- end-to-end mission: UI zones -> planner -> onboard simulator -> validator ---------------------------
+# ---- end-to-end mission: UI zones -> planner -> onboard simulator -> validator ----------------------
 def _mission_route_layer(plan_history):
     layers = []
     for index, item in enumerate(plan_history or []):
@@ -317,16 +451,46 @@ def _mission_divergence_layer(run_result):
     Output("card-autonomy", "children"), Output("card-mode", "children"),
     Output("card-comms", "children"), Output("card-route", "children"),
     Output("card-loop", "children"),
-    Input("btn-run", "n_clicks"), State("start", "data"), State("zones", "data"),
+    Input("btn-run", "n_clicks"),
+    State("start", "data"), State("zones", "data"),
     State("layer", "value"), State("speed", "data"), prevent_initial_call=True)
 def run(_n, start, zones, variable, speed):
     empty = (False, icons.PLAY, [], [], [], html.Div(), None, "-", "-", "-", "-", "-", "-")
     if not start:
         return (*empty[:5], html.Div("Set a launch position first: click the pin tool, then click the map.", className="warn"),
                 {"status": "not_started", "error": "No start position was set."}, *empty[7:])
+    if not zones or len(zones) < 2:
+        return (*empty[:5],
+                html.Div([
+                    html.B("Cannot start the mission. "),
+                    "You need one background rectangle (the area of interest) and at least one "
+                    "monitoring rectangle drawn INSIDE it.",
+                    html.Div("The 'Zones sent to the planner' panel on the right shows what the UI sees. "
+                             "If it shows only one zone, draw a second rectangle fully inside the first one.",
+                             className="small"),
+                ], className="warn"),
+                {"status": "not_started", "error": "Fewer than 2 zones."}, *empty[7:])
+    outside = [k for k, z in enumerate(zones[1:], start=1) if zone_outside(z, zones[0])]
+    if outside:
+        return (*empty[:5],
+                html.Div([
+                    html.B("Cannot start the mission. "),
+                    f"Zone(s) {', '.join(str(k + 1) for k in outside)} "
+                    "extend outside the area of interest (Zone 1).",
+                    html.Div("Delete those zones with the × button, or redraw them fully inside Zone 1.",
+                             className="small"),
+                ], className="warn"),
+                {"status": "not_started", "error": "Zones outside the area of interest."}, *empty[7:])
+    bad = [f"Zone {k + 1} {zone_coast_problem(z)}" for k, z in enumerate(zones)
+           if zone_coast_problem(z)]
+    if bad:
+        return (*empty[:5],
+                html.Div([html.B("Cannot start the mission. "),
+                          html.Ul([html.Li(b) for b in bad])], className="warn"),
+                {"status": "not_started", "error": "Zones violate the coast rule."}, *empty[7:])
     spacing = {"fast": 40.0, "medium": 20.0, "slow": 5.0}.get(speed, 20.0)
     payload = {
-        "zones": zones or [],
+        "zones": zones,
         "start": {"lat": start.get("lat"), "lon": start.get("lon")},
         "variable": variable,
         "budget_meters": 30000.0,
@@ -385,11 +549,12 @@ def hint(pin_mode, running, last_mission):
     if last_mission and last_mission.get("status") == "complete":
         return "Mission complete: cyan circles are samples; red circles identify Copernicus cells with divergence."
     if last_mission and last_mission.get("error"):
-        return "Mission was not started; check the message below and make sure the coast mask/dependencies are installed."
-    return "Draw one background rectangle first, then one or more monitoring rectangles. Pin a start position, then press Start."
+        return "Mission was not started; check the message below."
+    return ("Draw ONE big background rectangle first, then at least one monitoring rectangle INSIDE it. "
+            "Pin a start, then press Start. Press ? for instructions.")
 
 
-# ---- selection pills (speed / mode) ---------------------------------------------------------------------
+# ---- selection pills (speed / mode) ----------------------------------------------------------------
 def wire_segmented(prefix, options, store=None):
     ids = [f"{prefix}-{v}" for v, _ in options]
 
@@ -404,29 +569,125 @@ wire_segmented("speed", SPEED)
 wire_segmented("mode", MODES, store="mode_cmd")
 
 
-@app.callback(Output("card-mode", "children"), Input("mode_cmd", "data"))
+@app.callback(Output("card-mode", "children", allow_duplicate=True),
+              Input("mode_cmd", "data"), prevent_initial_call=True)
 def mode_card(m):
     return f"{m} (commanded)"
 
 
-# ---- zones (rectangles drawn by the user) -----------------------------------------------------------------
+# ---- zone helpers -------------------------------------------------------------------------------
+def _zone_row(text, zone_k, rejected=False):
+    style = {"display": "flex", "justifyContent": "space-between", "alignItems": "center",
+             "padding": "4px 8px", "borderBottom": "1px solid #eee",
+             "color": "#c33" if rejected else "#1b2430"}
+    btn_style = {"background": "#c33", "color": "white", "border": "none", "borderRadius": "4px",
+                 "cursor": "pointer", "padding": "2px 10px", "fontSize": "14px"}
+    return html.Div(style=style, children=[
+        html.Span(text),
+        html.Button("×", id={"type": "zone-del", "index": zone_k}, n_clicks=0,
+                    style=btn_style, title="Delete this area (UI only; use the map's trash icon to remove it from the map)"),
+    ])
+
+
+# ---- zones (rectangles drawn by the user) -------------------------------------------------------
+# IMPORTANT: this callback NEVER writes back to `edit`. Only `edit.geojson` is read.
+# Writing to `edit.action` / `edit.geojson` from a callback is what stops dash-leaflet 1.1.3
+# EditControl from emitting new draws (this was the cause of the empty `[]`).
 @app.callback(Output("zones", "data"), Output("zone_layer", "children"), Output("zones_json", "children"),
-              Output("zone_note", "children"), Input("edit", "geojson"))
-def zones_cb(gj):
-    zs = zones_from_geojson(gj)
-    layers, notes = [], []
+              Output("zone_note", "children"), Output("zone_list", "children"),
+              Input("edit", "geojson"), Input("hidden_zones", "data"))
+def zones_cb(gj, hidden):
+    hidden = set(hidden or [])
+    feats = list((gj or {}).get("features", []))
+    if feats:
+        print(f"[zones_cb] raw features: {len(feats)}, hidden indices: {sorted(hidden)}")
+    kept_feats = [f for i, f in enumerate(feats) if i not in hidden]
+    if not feats:
+        zs = []
+    else:
+        try:
+            zs = zones_from_geojson({"type": "FeatureCollection", "features": kept_feats})
+        except Exception as exc:
+            print(f"[zones_cb] zones_from_geojson failed: {exc!r}")
+            zs = []
+    print(f"[zones_cb] kept features: {len(kept_feats)}, zones: {len(zs)}")
+
+    layers, notes, rows = [], [], []
+    first_zone = zs[0] if zs else None
+
     for k, z in enumerate(zs):
-        b = zone_bounds(z)
-        cy, cx = (b[0][0] + b[1][0]) / 2, (b[0][1] + b[1][1]) / 2
-        if k > 0:       # priority areas get a white veil: overlaps get brighter = more important
+        try:
+            b = zone_bounds(z)
+        except Exception:
+            continue
+        outside = first_zone is not None and k > 0 and zone_outside(z, first_zone)
+        if outside:
+            layers.append(dl.Rectangle(bounds=b, color="#ff3030", weight=2, dashArray="4 4",
+                                       fillColor="#ff3030", fillOpacity=0.15,
+                                       interactive=False,
+                                       children=dl.Tooltip("Ignored: outside the area of interest")))
+        elif k > 0:
             layers.append(dl.Rectangle(bounds=b, weight=0, fillColor="white", fillOpacity=0.3,
                                        interactive=False))
-        layers.append(dl.CircleMarker(center=[cy, cx], radius=1, color="#111", interactive=False,
-                                      children=dl.Tooltip("Area of interest" if k == 0 else f"+{z['weight']}",
-                                                          permanent=True, direction="center")))
-        if not inside_grid(z, BOUNDS):
-            notes.append(f"Zone {k + 1} is partly outside the Copernicus grid. ")
-    return zs, layers, json.dumps(zs, indent=1), "".join(notes)
+
+        cprob = zone_coast_problem(z)
+        grid_prob = None if inside_grid(z, BOUNDS) else "is partly outside the Copernicus grid"
+        problems = []
+        if outside:
+            problems.append("is outside the area of interest (Zone 1)")
+        problems.extend(p for p in (cprob, grid_prob) if p)
+        if problems:
+            notes.append(f"Zone {k + 1} " + "; ".join(problems) + ". ")
+
+        label_txt = f"Zone {k + 1}" + (" (area of interest)" if k == 0 else "")
+        if problems:
+            label_txt += " ⚠ " + "; ".join(problems)
+        rows.append(_zone_row(label_txt, k, rejected=outside))
+
+    if len(zs) == 0:
+        rows.append(html.Div("No zones yet. Draw a rectangle with the pencil → rectangle tool on the map.",
+                             style={"color": "#c33", "padding": "4px 8px"}))
+    elif len(zs) == 1:
+        rows.append(html.Div("Draw at least one monitoring rectangle INSIDE the first rectangle.",
+                             style={"color": "#c33", "padding": "4px 8px"}))
+
+    return zs, layers, json.dumps(zs, indent=1), "".join(notes), rows
+
+
+# ---- per-zone delete (UI only: hides the feature from the mission; map drawing stays) ----------
+@app.callback(Output("hidden_zones", "data"),
+              Input({"type": "zone-del", "index": ALL}, "n_clicks"),
+              State("hidden_zones", "data"),
+              State("edit", "geojson"),
+              prevent_initial_call=True)
+def delete_zone(n_clicks_list, hidden, gj):
+    if not ctx.triggered:
+        return no_update
+    trigger = ctx.triggered[0]
+    if not trigger.get("value"):
+        return no_update
+    tid = ctx.triggered_id
+    if not isinstance(tid, dict) or tid.get("type") != "zone-del":
+        return no_update
+    zone_k = tid.get("index")
+    if not isinstance(zone_k, int):
+        return no_update
+    hidden = set(hidden or [])
+
+    # `zone_k` is an index into the *visible* zones. Map it back to a *feature* index
+    # (which is what `hidden_zones` stores), by walking the feature list, skipping hidden ones.
+    feats = list((gj or {}).get("features", []))
+    visible_idx = 0
+    for feat_idx in range(len(feats)):
+        if feat_idx in hidden:
+            continue
+        if visible_idx == zone_k:
+            hidden.add(feat_idx)
+            return sorted(hidden)
+        visible_idx += 1
+    return no_update
+
+
 
 
 if __name__ == "__main__":

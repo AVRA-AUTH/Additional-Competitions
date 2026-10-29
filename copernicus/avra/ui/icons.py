@@ -17,3 +17,7 @@ PLAY = _uri('<circle cx="16" cy="16" r="13" fill="#fff" stroke="#1db954" stroke-
             '<path d="M13 9.5l9 6.5-9 6.5z" fill="#1db954"/>')
 STOP = _uri('<circle cx="16" cy="16" r="13" fill="#fff" stroke="#d93025" stroke-width="2.5"/>'
             '<rect x="11" y="11" width="10" height="10" fill="#d93025"/>')
+INFO = _uri(
+    '<circle cx="16" cy="16" r="13" fill="#fff" stroke="#000" stroke-width="2"/>'
+    '<text x="16" y="23" text-anchor="middle" font-family="Arial" font-size="20" font-weight="bold" fill="#000">?</text>'
+)
