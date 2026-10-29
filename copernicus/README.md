@@ -31,8 +31,6 @@ python -m scripts.run_mission --request examples/thermaikos_mission.json
 
 That executes **fetch → zone conversion → plan → simulated vessel → cross-check → checkpoint replan**, then writes a timestamped folder under `runs/`. Copernicus data are fetched from the local cache by default. Set `"refresh_copernicus": true` in the request to refresh at mission start, or `"check_new_forecast": true` to check for a newer product at target-completion checkpoints.
 
-The included Thermaikos Gulf scenario is seeded from published mussel-farming study sites (Kavoura/Chalastra, Axios delta and Gallikos estuary). Its rectangles are *approximate demo boxes* around the published sampling coordinates, **not** surveyed farm-lease polygons, legal boundaries or navigation waypoints. Verify the coastline, land mask, local restrictions and exact launch position before any real-world use. Coordinates in the article: [PMC study on Thermaikos Gulf mussel-farming sampling sites](https://pmc.ncbi.nlm.nih.gov/articles/PMC7949245/).
-
 ## REST API
 
 The UI registers the same Flask blueprint on its server. It can also run standalone:
@@ -47,14 +45,6 @@ The standalone API listens on `http://127.0.0.1:8060`.
 - `POST /api/plan` — validate the request and return the route plus normalized planner inputs. No simulation is run.
 - `POST /api/run` — run the full mission and return its summary.
 - `GET /api/runs/<run_id>` — read the summary saved under `runs/<run_id>/summary.json`.
-
-Example planning request:
-
-```bash
-curl -X POST http://127.0.0.1:8060/api/plan \
-  -H 'Content-Type: application/json' \
-  --data @examples/thermaikos_mission.json
-```
 
 To run the full loop instead, use the same body at `/api/run`.
 
