@@ -1,3 +1,0 @@
-### AVRA Documentation
-
-Extremely important

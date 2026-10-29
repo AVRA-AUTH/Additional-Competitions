@@ -95,12 +95,6 @@ A 4 x 4 km area centred on a local frame at 40.30 N, 23.00 E, with the start at 
 | `testSampleScheduleSpacing` | The number of sample points matches the sampled distance divided by 5 m |
 | `testEnergyBudgetMatchesRequirement` | 2178 Wh at 165 W gives about 48.9 km, matching the PERF-5 power budget |
 
-### Not covered
-- Real coastlines or land masks (the `isAllowed` hook is not tested).
-- Non-square or rotated subareas.
-- Different priorities (all weights are equal).
-- Very large problems (more than about 15 subareas). Runtime was measured only on up to 10.
-
 ---
 
 ## 3. demoRoutePlanner.py and plotDemoRoutePlanner.py
@@ -149,7 +143,7 @@ What to look for: every farm is surrounded by a blue ring, green lines never ent
 
 ## 4. Assumptions and limitations of the route planner
 
-### Assumptions (taken as true for now)
+### Assumptions 
 **Inputs**
 - The area of interest is defined by the user as four GPS corners. Anomaly detection does not choose it.
 - The user places every subarea correctly inside the area. Each subarea is four GPS corners and convex.
@@ -177,7 +171,7 @@ What to look for: every farm is surrounded by a blue ring, green lines never ent
 - Planning is off-board and the ASV only executes the route (FUN-1). The planner is written in Python.
 - A local flat metric frame is accurate enough at kilometre scale.
 
-### Limitations (decided to leave for later)
+### Limitations 
 - **Land and coast distance:** only a hook (`isAllowed`) exists and it is checked on the start, the end and the ring corners, not on the legs between them. The 3 km coast rule is not enforced by the planner.
 - **Ring inside the farm:** sampling inside the farm polygon is not possible. Whether the ASV can enter later is open.
 - **Buffer and sample spacing:** values are placeholders and need real data.
@@ -188,7 +182,7 @@ What to look for: every farm is surrounded by a blue ring, green lines never ent
 - **Telemetry and telecommand link:** the route is handed to the onboard software as a `RerouteCommand` (see `onboardDocumentation.md`), converted by `convertPlanToRoute()` in `simulatorExample.py`. The real communication link that would carry it is not implemented.
 - **Real data:** only synthetic layouts have been tested.
 
-### Limitations that come from the current implementation (not yet discussed)
+### Limitations that come from the current implementation 
 - Subareas and the area must be convex. Other shapes are rejected as invalid.
 - The visiting order uses a heuristic (nearest neighbour plus 2-opt) and is not guaranteed optimal. It was tested on up to 10 subareas.
 - The last ring is chosen only by distance. Where the vessel would be safest to wait is not considered.
